@@ -1,215 +1,268 @@
-"""
-main.py - SafeDrive AI
-Central integration point for all modules including the 8 new features:
-head pose, yawn detection, fatigue scoring, voice alerts, event logging, 
-accident detection, and auto-reporting.
-"""
-import cv2
 import time
-import random
+import sys
+import datetime
+import threading
 
-# Core Vision and Health
-from vision import FaceMeshDetector, LEFT_EYE_INDICES, RIGHT_EYE_INDICES
-from drowsiness import DrowsinessDetector
-from health_monitor import HealthMonitor
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
-# New Hackathon Features
-from attention import AttentionDetector
-from yawn import YawnDetector
-from fatigue import FatigueScoring
-from voice_alert import VoiceAlertSystem
-from event_logger import EventLogger
-from accident import AccidentDetector
-from report_generator import ReportGenerator
+import config
+from vision import VisionMonitor
+from sensors import SensorMonitor
+from logic import LogicController
+from alerts import AlertSystem
+from dashboard import render_dashboard
 
-def main():
-    print("SafeDrive AI: Initialising with Advanced Features...")
-    cap = cv2.VideoCapture(0)
-    # 720p is good for the big dashboard
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+# ═══════════════════════════════════════
+# DEMO STAGES
+# ═══════════════════════════════════════
 
-    # Instantiate modules
-    detector        = FaceMeshDetector()
-    drowsiness_chk  = DrowsinessDetector(ear_threshold=0.22, consecutive_frames=15)
-    health_monitor  = HealthMonitor()
-    
-    attention_chk   = AttentionDetector(fps=30, distracted_time_threshold=3.0)
-    yawn_chk        = YawnDetector(mar_threshold=0.6, fps=30, yawn_time_threshold=1.0)
-    fatigue_sys     = FatigueScoring()
-    voice           = VoiceAlertSystem()
-    logger          = EventLogger()
-    accident_chk    = AccidentDetector(fps=30, missing_face_threshold=5.0)
-    reporter        = ReportGenerator()
+DEMO_STAGES = [
+    (0,   8,  "Stage 1/8 — Normal Driving",              None,            None),
+    (8,  12,  "Stage 2/8 — Yawning Detected",            "YAWNING",       None),
+    (12, 16,  "Stage 3/8 — Eyes Closing",                 "EYES_CLOSING",  None),
+    (16, 20,  "Stage 4/8 — Eyes Closed + Alarm",          "EYES_CLOSED",   None),
+    (20, 25,  "Stage 5/8 — Driver Unresponsive",          "EYES_CLOSED",   None),
+    (25, 30,  "Stage 6/8 — ECG Irregular, SpO2 Dropping", None,           "PRE_CARDIAC"),
+    (30, 35,  "Stage 7/8 — CARDIAC EMERGENCY",            None,           "CARDIAC"),
+    (35, 40,  "Stage 8/8 — SMS Sent, Hospital Notified",  None,           None),
+]
 
-    prev_time = time.time()
-    
-    # State flags
-    accident_reported = False
-    
-    print("System Active – press 'q' to quit.")
 
-    while cap.isOpened():
-        ok, frame = cap.read()
-        if not ok:
-            print("Camera read failed – exiting.")
-            break
+def get_demo_state(elapsed):
+    for start, end, label, vis_override, sensor_action in DEMO_STAGES:
+        if start <= elapsed < end:
+            return label, vis_override, sensor_action
+    return "DEMO COMPLETE", None, None
 
-        frame = cv2.flip(frame, 1)
-        h, w  = frame.shape[:2]
 
-        # ── 1. Update Health Sensors ────────────────────────────────
-        hdata = health_monitor.update_sensors()
-        
-        # Simulated GPS for this iteration
-        gps_lat = 37.7749 + random.uniform(-0.01, 0.01)
-        gps_lon = -122.4194 + random.uniform(-0.01, 0.01)
+# ═══════════════════════════════════════
+# SAFETY SCORE CALCULATOR
+# ═══════════════════════════════════════
 
-        # ── 2. Vision Processing ────────────────────────────────────
-        landmarks = detector.find_face_landmarks(frame)
-        face_detected = landmarks is not None
-        
-        # State variables
-        is_drowsy      = False
-        avg_ear        = 0.0
-        is_yawning     = False
-        mar            = 0.0
-        head_direction = "FORWARD"
-        is_distracted  = False
-        
-        if face_detected:
-            # Drowsiness (EAR)
-            left_pts  = detector.get_eye_coords(landmarks, LEFT_EYE_INDICES, w, h)
-            right_pts = detector.get_eye_coords(landmarks, RIGHT_EYE_INDICES, w, h)
-            left_ear  = drowsiness_chk.calculate_ear(left_pts)
-            right_ear = drowsiness_chk.calculate_ear(right_pts)
-            is_drowsy, avg_ear = drowsiness_chk.check_drowsiness(left_ear, right_ear)
-            
-            # Yawning (MAR)
-            mar = yawn_chk.calculate_mar(landmarks, w, h)
-            is_yawning, yawn_count = yawn_chk.check_yawn(mar)
-            
-            # Head Pose Attention
-            head_direction = attention_chk.get_head_pose(landmarks, w, h)
-            is_distracted = attention_chk.check_attention(head_direction)
-            
-            # Draw facial dots for feedback
-            for (x, y) in left_pts: cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
-            for (x, y) in right_pts: cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
-            
-        # ── 3. Fatigue Scoring & Alerts ──────────────────────────────
-        f_score, f_level = fatigue_sys.update_score(is_drowsy, is_yawning, is_distracted)
-        
-        # Voice and Logging Logic
-        if is_drowsy or f_level == "CRITICAL FATIGUE":
-            voice.play_alert("drowsy")
-            if is_drowsy and drowsiness_chk.frame_counter == drowsiness_chk.consecutive_frames:
-                logger.log_event("DROWSY", hdata['heart_rate'], hdata['spo2'], f_score, gps_lat, gps_lon)
-                
-        if is_distracted:
-            voice.play_alert("distracted")
-            if attention_chk.frames_distracted == attention_chk.max_distracted_frames:
-                logger.log_event("DISTRACTED", hdata['heart_rate'], hdata['spo2'], f_score, gps_lat, gps_lon)
-                
-        if hdata['emergency']:
-            voice.play_alert("medical")
-            if random.random() < 0.05: # occasional log
-                logger.log_event("MEDICAL", hdata['heart_rate'], hdata['spo2'], f_score, gps_lat, gps_lon)
-                
-        # ── 4. Accident Detection ──────────────────────────────────
-        is_accident = accident_chk.check_accident(face_detected, hdata['emergency'])
-        if is_accident and not accident_reported:
-            voice.play_alert("accident")
-            logger.log_event("ACCIDENT", hdata['heart_rate'], hdata['spo2'], f_score, gps_lat, gps_lon)
-            report_path = reporter.generate_report("ACCIDENT DETECTED", hdata, f_score, gps_lat, gps_lon)
-            print(f"!!! EMERGENCY REPORT GENERATED: {report_path} !!!")
-            accident_reported = True
-        elif not is_accident:
-            accident_reported = False
+SAFETY_PENALTIES = {
+    "YAWNING": 1, "DISTRACTED": 2, "HEAD_DROOPING": 2,
+    "EYES_CLOSING": 3, "EYES_CLOSED": 5, "MICROSLEEP": 8,
+    "DRIVER_ASLEEP": 10, "CARDIAC_EMERGENCY": 15,
+    "ACCIDENT": 20, "MEDICAL_SHOCK": 20,
+}
 
-        # ── 5. UI Rendering ────────────────────────────────────────
-        F = cv2.FONT_HERSHEY_DUPLEX
-        WHITE, RED, GREEN, YELLOW = (255,255,255), (0,0,255), (0,220,0), (0,255,255)
-        ORANGE, GREY = (0,165,255), (150,150,150)
-        
-        # Background panels
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (350, 280), (0, 0, 0), -1)
-        cv2.rectangle(overlay, (w-350, 10), (w-10, 280), (0, 0, 0), -1)
-        frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
-        
-        # --- LEFT PANEL: Driver State ---
-        cv2.putText(frame, "DRIVER STATE", (20, 40), F, 0.7, ORANGE, 2)
-        cv2.line(frame, (20, 50), (330, 50), WHITE, 1)
-        
-        cv2.putText(frame, f"Face: {'Detected' if face_detected else 'Missing'}", (20, 80), F, 0.6, GREEN if face_detected else RED, 1)
-        cv2.putText(frame, f"Pose: {head_direction}", (20, 110), F, 0.6, YELLOW if is_distracted else WHITE, 1)
-        cv2.putText(frame, f"EAR : {avg_ear:.3f} | MAR: {mar:.2f}", (20, 140), F, 0.6, WHITE, 1)
-        
-        # Fatigue Bar
-        cv2.putText(frame, "FATIGUE SCORE:", (20, 180), F, 0.6, WHITE, 1)
-        bar_w = 250
-        cv2.rectangle(frame, (20, 195), (20 + bar_w, 215), GREY, 1)
-        fill_w = int((f_score / 100.0) * bar_w)
-        score_color = GREEN if f_score < 30 else (YELLOW if f_score < 70 else RED)
-        if fill_w > 0:
-            cv2.rectangle(frame, (21, 196), (20 + fill_w - 1, 214), score_color, -1)
-        cv2.putText(frame, f"{f_score}/100", (20 + bar_w + 10, 210), F, 0.6, score_color, 1)
-        
-        cv2.putText(frame, f"Level: {f_level}", (20, 250), F, 0.65, score_color, 2)
 
-        # --- RIGHT PANEL: Health & Safety ---
-        cv2.putText(frame, "HEALTH VITALS", (w-330, 40), F, 0.7, ORANGE, 2)
-        cv2.line(frame, (w-330, 50), (w-20, 50), WHITE, 1)
-        
-        hr_col = RED if hdata['emergency'] and (hdata['heart_rate']>120 or hdata['heart_rate']<50) else WHITE
-        sp_col = RED if hdata['emergency'] and hdata['spo2']<90 else WHITE
-        
-        cv2.putText(frame, f"Heart Rate:  {hdata['heart_rate']} bpm", (w-330, 80), F, 0.6, hr_col, 1)
-        cv2.putText(frame, f"SpO2 Level:  {hdata['spo2']} %", (w-330, 110), F, 0.6, sp_col, 1)
-        cv2.putText(frame, f"ECG Status:  {hdata['ecg_status']}", (w-330, 140), F, 0.6, WHITE, 1)
-        
-        # Overall Status
-        cv2.putText(frame, "SYSTEM STATUS:", (w-330, 190), F, 0.6, ORANGE, 1)
-        if is_accident:
-            sys_stat, sys_col = "ACCIDENT DETECTED", RED
-        elif hdata['emergency']:
-            sys_stat, sys_col = "MEDICAL EMERGENCY", RED
-        elif f_level == "CRITICAL FATIGUE" or is_drowsy:
-            sys_stat, sys_col = "DRIVER DROWSY", RED
-        elif is_distracted:
-            sys_stat, sys_col = "DRIVER DISTRACTED", YELLOW
-        else:
-            sys_stat, sys_col = "SAFE", GREEN
-            
-        cv2.putText(frame, sys_stat, (w-330, 230), F, 0.7, sys_col, 2)
+def update_safety_score(shared_state, state):
+    penalty = SAFETY_PENALTIES.get(state, 0)
+    if penalty > 0:
+        shared_state["safety_score"] = max(0, shared_state["safety_score"] - penalty)
+        shared_state["last_clean_time"] = time.time()
+    else:
+        if (time.time() - shared_state.get("last_clean_time", time.time())) > 300:
+            shared_state["safety_score"] = min(100, shared_state["safety_score"] + 1)
 
-        # ── 6. BIG ALERTS (Center Screen) ──────────────────────────
-        center_x = w // 2
-        center_y = h - 80
-        if is_accident:
-            cv2.rectangle(frame, (center_x-300, center_y-40), (center_x+300, center_y+20), RED, -1)
-            cv2.putText(frame, "!!! CRASH DETECTED - CONTACTING SOS !!!", (center_x-280, center_y), F, 0.8, WHITE, 2)
-        elif sys_col == RED:
-            # Flashing effect
-            if int(time.time() * 4) % 2 == 0:
-                cv2.rectangle(frame, (center_x-250, center_y-40), (center_x+250, center_y+20), RED, -1)
-                cv2.putText(frame, f"WARNING: {sys_stat}", (center_x-200, center_y), F, 0.8, WHITE, 2)
 
-        # --- Status Bar ---
-        cv2.rectangle(frame, (0, h-30), (w, h), (20, 20, 20), -1)
-        fps = 1.0 / max(time.time() - prev_time, 1e-6)
-        prev_time = time.time()
-        cv2.putText(frame, "SafeDrive AI Extended | Logging: Active | Voice: Active", (10, h-10), F, 0.45, GREY, 1)
-        cv2.putText(frame, f"FPS: {fps:.1f}", (w-120, h-10), F, 0.45, GREY, 1)
+# ═══════════════════════════════════════
+# BACKGROUND LOGIC LOOP
+# ═══════════════════════════════════════
 
-        cv2.imshow("SafeDrive AI - Advanced Dashboard", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+def logic_loop(shared_state, vision_monitor, sensor_monitor, logic_controller, alert_system):
+    """Runs at 10Hz in a background thread. Updates shared_state for the dashboard."""
 
-    cap.release()
-    cv2.destroyAllWindows()
-    print("SafeDrive AI Shutdown.")
+    demo_cardiac_injected = False
+    demo_pre_cardiac_injected = False
 
-if __name__ == "__main__":
-    main()
+    while shared_state.get("running", True):
+        try:
+            # ─── Read button triggers from dashboard ───
+            with shared_state["lock"]:
+                if shared_state.get("trigger_demo"):
+                    shared_state["demo_active"] = not shared_state.get("demo_active", False)
+                    shared_state["demo_start_time"] = time.time()
+                    shared_state["trigger_demo"] = False
+                    demo_cardiac_injected = False
+                    demo_pre_cardiac_injected = False
+
+                if shared_state.get("trigger_cardiac"):
+                    sensor_monitor.inject_cardiac_emergency()
+                    shared_state["trigger_cardiac"] = False
+
+                if shared_state.get("trigger_accident"):
+                    sensor_monitor.inject_accident()
+                    shared_state["trigger_accident"] = False
+
+                if shared_state.get("trigger_reset"):
+                    alert_system._send_command_to_esp32("RESET")
+                    alert_system.cancel_active = False
+                    alert_system.cancel_remaining = 0
+                    alert_system.offence_count = 0
+                    shared_state["safety_score"] = 100
+                    shared_state["demo_active"] = False
+                    shared_state["demo_stage"] = ""
+                    shared_state["trigger_reset"] = False
+
+            # ─── Vision status ───
+            vision_status = vision_monitor.get_status()
+
+            # ─── Demo mode override ───
+            demo_active = shared_state.get("demo_active", False)
+            if demo_active:
+                elapsed = time.time() - shared_state.get("demo_start_time", time.time())
+                label, vis_override, sensor_action = get_demo_state(elapsed)
+
+                with shared_state["lock"]:
+                    shared_state["demo_stage"] = label
+
+                if vis_override:
+                    vision_status = vis_override
+
+                if sensor_action == "PRE_CARDIAC" and not demo_pre_cardiac_injected:
+                    sensor_monitor.inject_cardiac_emergency()
+                    demo_pre_cardiac_injected = True
+
+                if sensor_action == "CARDIAC" and not demo_cardiac_injected:
+                    sensor_monitor.inject_cardiac_emergency()
+                    demo_cardiac_injected = True
+            else:
+                with shared_state["lock"]:
+                    shared_state["demo_stage"] = ""
+
+            # ─── Sensor data ───
+            sensor_data = sensor_monitor.get_data()
+
+            # ─── Logic classification ───
+            result = logic_controller.classify(vision_status, sensor_data)
+
+            # ─── Alerts ───
+            alert_system.handle(result, button_pressed=False)
+
+            # ─── Update shared state for dashboard ───
+            with shared_state["lock"]:
+                shared_state["vision_status"] = vision_status
+                shared_state["sensor_data"]   = sensor_data
+                shared_state["logic_result"]  = result
+                shared_state["cancel_remaining"] = alert_system.cancel_remaining
+                shared_state["alert_history"] = alert_system.get_history()
+
+                # Camera frame
+                frame = vision_monitor.current_frame
+                if frame is not None:
+                    shared_state["current_frame"] = frame.copy()
+
+                # Vision metrics
+                shared_state["perclos"]    = vision_monitor.get_perclos()
+                shared_state["blink_rate"] = vision_monitor.get_blink_rate()
+                shared_state["avg_ear"]    = getattr(vision_monitor, 'avg_ear', 0.0)
+                shared_state["head_angle"] = getattr(vision_monitor, 'head_angle', 0.0)
+
+                # Safety score
+                update_safety_score(shared_state, result.get("state", "NORMAL"))
+
+            # Push health data into vision overlay (thread-safe via internal lock)
+            vision_monitor.update_health_data(sensor_data, result.get("state", "NORMAL"))
+
+        except Exception as e:
+            print(f"LOGIC LOOP ERROR: {e}")
+            try:
+                with open("error_log.txt", "a") as f:
+                    f.write(f"LOGIC LOOP ERROR: {str(e)}\n")
+            except Exception:
+                pass
+
+        time.sleep(0.1)  # 10Hz
+
+
+# ═══════════════════════════════════════
+# INITIALIZATION (runs once per session)
+# ═══════════════════════════════════════
+
+def initialize_system():
+    """Initialize all subsystems. Called once via st.session_state."""
+
+    print("=" * 55)
+    print("   VITALDRIVE AI — INITIALIZING (Integrated Build)")
+    print("   sleep/dash.py + SafeDriveAI fully merged")
+    print("=" * 55)
+    print(f"  Simulation Mode : {config.SIMULATION_MODE}")
+    src = getattr(config, 'CAMERA_SOURCE', 'WEBCAM')
+    if src == 'WEBCAM':
+        print(f"  Camera Mode     : Webcam #{getattr(config, 'WEBCAM_INDEX', 0)}")
+    else:
+        print(f"  Camera Mode     : ESP32-CAM (IP: {config.ESP32_CAM_IP})")
+    print(f"  Voice Enabled   : {config.VOICE_ENABLED}")
+    print(f"  SMS Ready       : {'YES' if config.TWILIO_SID != 'your_sid' else 'NO (configure Twilio in sidebar)'}")
+    print("=" * 55)
+
+    # Shared state dictionary (thread-safe)
+    shared_state = {
+        "lock":            threading.Lock(),
+        "running":         True,
+        "vision_status":   "NO_FACE",
+        "sensor_data":     {},
+        "logic_result":    {},
+        "cancel_remaining": 0,
+        "current_frame":   None,
+        "alert_history":   [],
+        "demo_stage":      "",
+        "demo_active":     False,
+        "demo_start_time": 0,
+        "perclos":         0.0,
+        "blink_rate":      0,
+        "avg_ear":         0.0,
+        "head_angle":      0.0,
+        "safety_score":    100,
+        "last_clean_time": time.time(),
+        # Dashboard button triggers
+        "trigger_demo":     False,
+        "trigger_cardiac":  False,
+        "trigger_accident": False,
+        "trigger_reset":    False,
+    }
+
+    # Start sensors
+    print("  [1/4] Starting sensor thread...")
+    sensor_monitor = SensorMonitor()
+    sensor_monitor.start()
+    time.sleep(2)
+
+    # Start alerts (includes voice engine)
+    print("  [2/4] Starting alert system...")
+    alert_system = AlertSystem(serial_interface=sensor_monitor)
+
+    # Start vision
+    print("  [3/4] Starting camera/vision thread...")
+    vision_monitor = VisionMonitor()
+    vision_monitor.start()
+    time.sleep(1)
+
+    # Start logic loop
+    print("  [4/4] Starting logic loop...")
+    logic_controller = LogicController()
+    logic_thread = threading.Thread(
+        target=logic_loop,
+        args=(shared_state, vision_monitor, sensor_monitor, logic_controller, alert_system),
+        daemon=True
+    )
+    logic_thread.start()
+
+    print("=" * 55)
+    print("  SYSTEM READY — All modules online")
+    print("=" * 55)
+
+    return shared_state, vision_monitor, sensor_monitor, alert_system
+
+
+# ═══════════════════════════════════════
+# STREAMLIT ENTRY POINT
+# ═══════════════════════════════════════
+
+# Initialize once per session
+if "initialized" not in st.session_state:
+    shared_state, vision_monitor, sensor_monitor, alert_system = initialize_system()
+    st.session_state.initialized    = True
+    st.session_state.shared_state   = shared_state
+    st.session_state.vision_monitor = vision_monitor
+    st.session_state.sensor_monitor = sensor_monitor
+    st.session_state.alert_system   = alert_system
+
+# Auto-refresh every 500 ms for smoother dashboard
+st_autorefresh(interval=500, key="vitaldrive_refresh")
+
+# Render the dashboard
+render_dashboard(st.session_state.shared_state)

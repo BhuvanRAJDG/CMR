@@ -1,6 +1,13 @@
 opencv-python
 mediapipe
-numpy
+pyserial
+twilio
 scipy
+requests
+Pillow
+streamlit
+plotly
+streamlit-autorefresh
 pyttsx3
-fpdf2
+pandas
+numpy
