@@ -1,0 +1,63 @@
+﻿python : 2026-03-15 
+12:28:48.306225: I tensorflow
+/core/util/port.cc:153] 
+oneDNN custom operations are 
+on. You may see slightly 
+different numerical results 
+due to floating-point 
+round-off errors from 
+different computation 
+orders. To turn them off, 
+set the environment variable 
+`TF_ENABLE_ONEDNN_OPTS=0`.
+At line:1 char:1
++ python main.py 2>&1 | 
+Out-File -Encoding utf8 
+log.txt
++ ~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo           
+   : NotSpecified: (2026-03  
+  -15 12:2...ONEDNN_OPTS=0   
+ `.:String) [], RemoteExc    
+eption
+    + FullyQualifiedErrorId  
+   : NativeCommandError
+ 
+2026-03-15 12:29:00.656381: 
+I tensorflow/core/util/port.c
+c:153] oneDNN custom 
+operations are on. You may 
+see slightly different 
+numerical results due to 
+floating-point round-off 
+errors from different 
+computation orders. To turn 
+them off, set the 
+environment variable 
+`TF_ENABLE_ONEDNN_OPTS=0`.
+SafeDrive AI: Initialising with Advanced Features...
+Traceback (most recent call 
+last):
+  File "C:\Users\govin\Downlo
+ads\New 
+folder\SafeDriveAI\main.py", 
+line 215, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\govin\Downlo
+ads\New 
+folder\SafeDriveAI\main.py", 
+line 33, in main
+    detector        = 
+FaceMeshDetector()
+  File "C:\Users\govin\Downlo
+ads\New folder\SafeDriveAI\vi
+sion.py", line 30, in 
+__init__
+    mp_face_mesh = 
+mp.solutions.face_mesh
+                   
+^^^^^^^^^^^^
+AttributeError: module 
+'mediapipe' has no attribute 
+'solutions'
